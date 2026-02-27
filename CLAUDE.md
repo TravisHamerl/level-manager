@@ -34,11 +34,13 @@ python level_manager.py
 # or double-click "Level Manager.bat"
 ```
 
-1. Open and dock the **Levels panel** in Mastercam (groups expanded)
-2. Click **Connect** to discover the panel and scan levels
-3. **Double-click** a level to toggle its visibility
-4. **Right-click** or double-click the Hotkey column to assign a global hotkey
-5. Use assigned hotkeys from anywhere (no need to focus the app)
+1. Open and dock the **Levels panel** in Mastercam
+2. **Scroll the levels you need into view** — the tree is virtualized and only visible items are accessible
+3. Click **Connect** to discover the panel and scan levels
+4. **Double-click** a level to toggle its visibility
+5. **Right-click** or double-click the Hotkey column to assign a global hotkey
+6. Use assigned hotkeys from anywhere (no need to focus the app)
+7. If hotkeys stop working, the app will notify you — click **Refresh** to reconnect
 
 ### CLI Toggle
 ```bash
@@ -52,10 +54,16 @@ Press Escape to quit.
 
 ### Mastercam Connection
 
-Two-phase discovery for speed:
+Two-phase discovery with GUID caching for speed:
 
-1. **Win32 fast path** — `EnumWindows` + `EnumChildWindows` to find the Levels panel by its HwndWrapper GUID (`732c3493` in the class name)
-2. **UIA fallback** — If GUID not found, enumerate all HwndWrapper windows and test each with UIA until finding one containing `LevelTreeListBox`
+1. **Cached GUID fast path** — On first successful connect, the Levels panel's HwndWrapper GUID is saved to settings. Subsequent connects use this GUID for instant Win32 lookup (~4s vs ~11s)
+2. **Slow probe fallback** — If no cached GUID (first run) or cache is stale (Mastercam update), enumerates all HwndWrapper child windows and tests each with UIA until finding one containing `LevelTreeListBox`. Caches the discovered GUID for next time
+
+The GUID is stored in `%LOCALAPPDATA%` (per-machine), so each computer discovers and caches its own GUID independently.
+
+### Virtualized Levels Tree
+
+The Mastercam Levels tree is **virtualized** — only items currently visible in the viewport have UIA elements. Items scrolled off-screen are not accessible. Users must scroll the levels they need into view before connecting.
 
 ### Levels Panel Structure (UIA)
 ```
@@ -64,16 +72,16 @@ LevelTreeListBox (Tree, auto_id="LevelTreeListBox")
   │   ├─ LevelTreeItem (TreeItem)
   │   │   ├─ Edit (level number, e.g. "202")
   │   │   ├─ Edit (level name, e.g. "Geometry")
-  │   │   └─ Button (auto_id="IsLevelVisibleButton" — Toggle + Invoke patterns)
+  │   │   └─ Button (auto_id="IsLevelVisibleButton" — Invoke pattern only)
   │   └─ ... more levels
   └─ LevelTreeItem (ungrouped levels at root)
 ```
 
 ### Visibility Toggle
 
-Uses UIA `Invoke` pattern on `IsLevelVisibleButton` — no mouse movement required.
+Uses UIA `Invoke` pattern on `IsLevelVisibleButton` — no mouse movement required. The Toggle pattern is **not available** on these buttons; only Invoke is supported.
 
-**Stale reference recovery:** If `Invoke()` throws an exception (stale COM reference), the app reconnects to the Levels panel and retries.
+**Stale reference notification:** If `Invoke()` throws an exception (stale COM reference after Mastercam changes levels), the app shows a notification with a bell/flash and prompts the user to click Refresh. No automatic reconnection (which would cause a ~12s freeze).
 
 ### Hotkey System
 
@@ -93,9 +101,10 @@ Uses UIA `Invoke` pattern on `IsLevelVisibleButton` — no mouse movement requir
 
 ### Settings Persistence
 
-Stored at `%LOCALAPPDATA%\LevelManager\settings.json` (not in Dropbox):
+Stored at `%LOCALAPPDATA%\LevelManager\settings.json` (per-machine, not in Dropbox):
 - Hotkey assignments (per level number)
 - Group definitions and group hotkeys
+- Cached Levels panel GUID (for fast reconnect)
 - Window geometry
 
 ## Key Functions
@@ -104,18 +113,19 @@ Stored at `%LOCALAPPDATA%\LevelManager\settings.json` (not in Dropbox):
 
 | Function | Description |
 |----------|-------------|
-| `find_levels_hwnd()` | Win32 fast discovery of Levels panel handle |
-| `connect_levels_panel()` | UIA connect to panel; returns `(wrapper, error_msg)` |
-| `find_level_tree(panel)` | Find `LevelTreeListBox` Tree control |
-| `scan_levels(tree)` | Scan tree items, return list of `{number, name, item, vis_btn}` dicts |
+| `_find_mastercam_hwnd()` | Win32 fast discovery of main Mastercam window |
+| `_find_levels_by_guid(mc_hwnd, guid)` | Win32 search for HwndWrapper with specific GUID |
+| `connect_levels_panel()` | Full connect: returns `(panel, tree, error_msg)` with GUID caching |
+| `scan_levels(tree)` | Scan visible tree items, return list of `{number, name, item, vis_btn}` dicts |
 
 ### Toggle (`level_manager.py`)
 
 | Function | Description |
 |----------|-------------|
 | `toggle_visibility(level)` | Invoke button; returns `True` on success, `False` on exception |
-| `_hotkey_toggle(number)` | Single level toggle with reconnect on failure |
-| `_hotkey_toggle_group(numbers, name)` | Group toggle with reconnect on complete failure |
+| `_notify_stale()` | Show stale connection notification with bell/flash |
+| `_hotkey_toggle(number)` | Single level toggle; notifies on stale reference |
+| `_hotkey_toggle_group(numbers, name)` | Group toggle with partial failure reporting |
 
 ### Hotkey Helpers (`level_manager.py`)
 
@@ -130,13 +140,20 @@ Stored at `%LOCALAPPDATA%\LevelManager\settings.json` (not in Dropbox):
 - Ensure the Levels panel is open/docked in Mastercam (not just the tab — the panel itself must be visible)
 - Click **Connect** / **Refresh** to retry
 
-### Hotkeys stop working
-- The app auto-detects stale references and reconnects. If issues persist, click **Refresh**
+### Hotkeys stop working / "Connection stale"
+- The app notifies you when references go stale — click **Refresh** to reconnect
+- This happens when levels are added, deleted, or reordered in Mastercam
 - If Mastercam was restarted, click **Connect** to re-establish the connection
 
-### Levels not appearing after connect
-- Expand all groups in Mastercam's Levels panel before connecting
+### Missing levels after connect
+- The Levels tree is virtualized: only levels visible in Mastercam's panel are found
+- Scroll the levels you need into view in Mastercam, then click **Refresh**
 - Collapsed group children are not accessible via UIA until expanded
+
+### First connect is slow (~11s)
+- Normal: the app is discovering the Levels panel GUID for the first time
+- Subsequent connects use the cached GUID and are faster (~4s)
+- If slow every time, the GUID may have changed (Mastercam update) — the app auto-discovers and re-caches
 
 ## Development Tools
 
@@ -148,7 +165,10 @@ Stored at `%LOCALAPPDATA%\LevelManager\settings.json` (not in Dropbox):
 
 ## Technical Notes
 
-- **No mouse movement** — all operations use UIA patterns (`Invoke`, `Toggle`, `SelectionItem`), not simulated clicks
+- **No mouse movement** — all operations use UIA `Invoke` pattern, not simulated clicks
 - **Settings path** — `%LOCALAPPDATA%\LevelManager\settings.json` avoids Dropbox sync conflicts across machines
+- **GUID caching** — each machine discovers and caches its own Levels panel GUID independently
 - **Dark theme** — uses `sv_ttk` (Sun Valley theme) for modern dark appearance
 - **Launcher** — `Level Manager.bat` tries common Python install paths, py launcher, then PATH
+- **Virtualized tree** — Mastercam only creates UIA elements for visible items (~25% of tree at a time); `tree.children()` takes ~4.6s, per-level extraction ~150ms each
+- **Toggle pattern unavailable** — `IsLevelVisibleButton` only supports `Invoke`, not `Toggle`; state read-back is not possible
