@@ -81,7 +81,9 @@ LevelTreeListBox (Tree, auto_id="LevelTreeListBox")
 
 Uses UIA `Invoke` pattern on `IsLevelVisibleButton` — no mouse movement required. The Toggle pattern is **not available** on these buttons; only Invoke is supported.
 
-**Stale reference notification:** If `Invoke()` throws an exception (stale COM reference after Mastercam changes levels), the app shows a notification with a bell/flash and prompts the user to click Refresh. No automatic reconnection (which would cause a ~12s freeze).
+**Stale reference detection:** Before each `Invoke()`, the app checks `btn.exists()` to detect stale COM wrappers (which silently do nothing instead of throwing). If stale, shows a notification with bell/flash prompting the user to click Refresh.
+
+**Level renumbering support:** When levels are renumbered in Mastercam, clicking Refresh reconciles hotkey and group assignments by matching levels by **name** (which stays stable across renumbering). Remapped entries are saved to settings automatically.
 
 ### Hotkey System
 
@@ -171,4 +173,4 @@ Stored at `%LOCALAPPDATA%\LevelManager\settings.json` (per-machine, not in Dropb
 - **Dark theme** — uses `sv_ttk` (Sun Valley theme) for modern dark appearance
 - **Launcher** — `Level Manager.bat` tries common Python install paths, py launcher, then PATH
 - **Virtualized tree** — Mastercam only creates UIA elements for visible items (~25% of tree at a time); `tree.children()` takes ~4.6s, per-level extraction ~150ms each
-- **Toggle pattern unavailable** — `IsLevelVisibleButton` only supports `Invoke`, not `Toggle`; state read-back is not possible
+- **Toggle pattern unavailable** — `IsLevelVisibleButton` only supports `Invoke`, not `Toggle`; state read-back not possible

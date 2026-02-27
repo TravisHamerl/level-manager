@@ -226,15 +226,17 @@ def scan_levels(tree):
 
 
 def toggle_visibility(level):
-    """Toggle a level's visibility. Returns True on success."""
+    """Toggle a level's visibility. Returns True on success, False if stale."""
     btn = level.get("vis_btn")
-    if btn:
-        try:
-            btn.iface_invoke.Invoke()
-            return True
-        except Exception:
-            pass
-    return False
+    if not btn:
+        return False
+    try:
+        if not btn.exists():
+            return False
+        btn.iface_invoke.Invoke()
+        return True
+    except Exception:
+        return False
 
 
 # ---------- Hotkey helpers ----------
@@ -461,10 +463,58 @@ class LevelManagerApp:
 
         self.panel = panel
         self.tree = tree
-        levels = scan_levels(tree)
-        self.levels = levels
+        old_levels = self.levels
+        self.levels = scan_levels(tree)
+        remapped = self._reconcile_numbers(old_levels)
         self._populate_treeview()
-        self._set_status(f"Connected — {len(levels)} level(s) found")
+        if remapped:
+            self._set_status(f"Connected — {len(self.levels)} level(s), remapped {remapped} hotkey(s)")
+        else:
+            self._set_status(f"Connected — {len(self.levels)} level(s) found")
+
+    def _reconcile_numbers(self, old_levels):
+        """Remap hotkeys and groups when level numbers change.
+
+        Compares old and new levels by name. If a name matches but the
+        number changed, updates self.hotkeys keys and self.groups member
+        lists to use the new number. Returns count of remapped entries.
+        """
+        if not old_levels:
+            return 0
+
+        # Build name→number maps, skipping duplicate names
+        def _unique_name_map(levels):
+            name_counts = {}
+            for lvl in levels:
+                name_counts[lvl["name"]] = name_counts.get(lvl["name"], 0) + 1
+            return {lvl["name"]: lvl["number"] for lvl in levels
+                    if name_counts.get(lvl["name"]) == 1}
+
+        old_map = _unique_name_map(old_levels)   # name → old number
+        new_map = _unique_name_map(self.levels)   # name → new number
+
+        # Find renumbered levels: same name, different number
+        remap = {}  # old_number → new_number
+        for name, old_num in old_map.items():
+            new_num = new_map.get(name)
+            if new_num and new_num != old_num:
+                remap[old_num] = new_num
+
+        if not remap:
+            return 0
+
+        # Remap hotkeys dict keys
+        for old_num, new_num in remap.items():
+            if old_num in self.hotkeys:
+                self.hotkeys[new_num] = self.hotkeys.pop(old_num)
+
+        # Remap group member lists
+        for grp in self.groups.values():
+            members = grp.get("levels", [])
+            grp["levels"] = [remap.get(n, n) for n in members]
+
+        self._save_settings()
+        return len(remap)
 
     def _populate_treeview(self):
         """Rebuild the treeview with groups and ungrouped levels."""
