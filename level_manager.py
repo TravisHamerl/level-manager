@@ -464,6 +464,12 @@ class LevelManagerApp:
         except Exception:
             pass
 
+    def _orphaned_hotkeys(self):
+        """Return hotkey entries whose level number isn't in the current scan."""
+        level_nums = {lvl["number"] for lvl in self.levels}
+        return [(num, hk) for num, hk in self.hotkeys.items()
+                if num not in level_nums]
+
     # ---------- Connection ----------
 
     def _on_connect_click(self):
@@ -661,8 +667,10 @@ class LevelManagerApp:
         """Rebuild the treeview with groups and ungrouped levels."""
         self.treeview.delete(*self.treeview.get_children())
 
-        # Tags for grouped member levels
+        # Tags for grouped member levels and orphaned hotkeys
         self.treeview.tag_configure("grouped", foreground="#32CD32")
+        self.treeview.tag_configure("orphaned", foreground="#888888")
+        self.treeview.tag_configure("separator", foreground="#666666")
 
         # Track which levels are in groups
         grouped_nums = set()
@@ -699,6 +707,19 @@ class LevelManagerApp:
             hk_str = hotkey_to_str(self.hotkeys.get(num))
             iid = f"lv_{num}"
             self.treeview.insert("", tk.END, iid=iid, values=(num, lvl["name"], hk_str))
+
+        # Show orphaned hotkeys (level not in current scan)
+        orphaned = self._orphaned_hotkeys()
+        if orphaned:
+            self.treeview.insert("", tk.END, iid="orphan_sep", text="",
+                                 values=("", "\u2500\u2500 Available \u2500\u2500", ""),
+                                 tags=("separator",))
+            for num, hk in orphaned:
+                label = f"was: {hk.get('level_name', f'Level {num}')}"
+                iid = f"orphan_{num}"
+                self.treeview.insert("", tk.END, iid=iid,
+                                     values=(f"({num})", label, hotkey_to_str(hk)),
+                                     tags=("orphaned",))
 
     # ---------- Level actions ----------
 
@@ -946,10 +967,15 @@ class LevelManagerApp:
         is_group = target.startswith("grp:")
 
         # Check for conflicts against all level hotkeys and group hotkeys
-        for existing_num, existing_hk in self.hotkeys.items():
+        orphaned_nums = {num for num, _ in self._orphaned_hotkeys()}
+        for existing_num, existing_hk in list(self.hotkeys.items()):
             if not is_group and existing_num == target:
                 continue
-            if existing_hk == hk:
+            if existing_hk.get("key") == hk.get("key") and existing_hk.get("modifiers") == hk.get("modifiers"):
+                if existing_num in orphaned_nums:
+                    # Overwrite orphaned hotkey silently
+                    del self.hotkeys[existing_num]
+                    continue
                 self._set_status(f"Conflict: {hotkey_to_str(hk)} already assigned to level {existing_num}")
                 self._restore_recording_display(target)
                 self._start_hotkey_listener()
@@ -972,6 +998,13 @@ class LevelManagerApp:
             self.treeview.set(self._grp_iid(grp_name), "hotkey", hotkey_to_str(hk))
             self._set_status(f"Group \"{grp_name}\": hotkey set to {hotkey_to_str(hk)}")
         else:
+            # Store level name so orphaned hotkeys can show "was: Name"
+            level_name = None
+            for lvl in self.levels:
+                if lvl["number"] == target:
+                    level_name = lvl["name"]
+                    break
+            hk["level_name"] = level_name or f"Level {target}"
             self.hotkeys[target] = hk
             self._save_settings()
             self.treeview.set(self._iid(target), "hotkey", hotkey_to_str(hk))
@@ -1067,7 +1100,10 @@ class LevelManagerApp:
         if retry:
             self._auto_rescan_and_retry(level_number=level_number)
         else:
-            self._set_status(f"Level {level_number} not found — try Refresh")
+            hk = self.hotkeys.get(level_number)
+            name = hk.get("level_name", level_number) if hk else level_number
+            self._set_status(f"Level {name} ({level_number}) not found — hotkey available")
+            self._populate_treeview()
 
     def _hotkey_toggle_group(self, level_numbers, group_name, retry=True):
         """Toggle all levels in a group (called from hotkey)."""
