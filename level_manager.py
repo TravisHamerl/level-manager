@@ -227,17 +227,28 @@ def scan_levels(tree):
 
 
 def toggle_visibility(level):
-    """Toggle a level's visibility. Returns True on success, False if stale."""
-    btn = level.get("vis_btn")
-    if not btn:
+    """Toggle a level's visibility. Returns True on success, False if stale.
+
+    Re-finds the visibility button fresh from the cached TreeItem on each
+    call (~150ms overhead). This avoids stale cached button wrappers that
+    silently do nothing on Invoke() on some machines.
+    """
+    item = level.get("item")
+    if not item:
         return False
     try:
-        # Access a property to verify the wrapper is still valid.
-        # Stale COM wrappers throw on property access, while Invoke()
-        # silently does nothing.
-        btn.element_info.runtime_id
-        btn.iface_invoke.Invoke()
-        return True
+        # Re-fetch children from the TreeItem — live UIA call.
+        # If the item was destroyed (tree rebuilt), this throws or
+        # returns empty, which we catch as stale.
+        for child in item.children():
+            try:
+                if (child.element_info.control_type == "Button"
+                        and child.automation_id() == "IsLevelVisibleButton"):
+                    child.iface_invoke.Invoke()
+                    return True
+            except Exception:
+                pass
+        return False  # button not found → stale
     except Exception:
         return False
 

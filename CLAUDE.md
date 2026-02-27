@@ -81,7 +81,7 @@ LevelTreeListBox (Tree, auto_id="LevelTreeListBox")
 
 Uses UIA `Invoke` pattern on `IsLevelVisibleButton` — no mouse movement required. The Toggle pattern is **not available** on these buttons; only Invoke is supported.
 
-**Stale reference detection:** Before each `Invoke()`, the app reads `btn.element_info.runtime_id` to verify the COM wrapper is still valid (stale wrappers throw here, while `Invoke()` silently does nothing).
+**Fresh button lookup:** Each toggle re-finds `IsLevelVisibleButton` fresh from the cached TreeItem via `item.children()` (~150ms). This avoids stale cached button wrappers that silently do nothing on `Invoke()` on some machines. If the item itself is stale (tree rebuilt), `children()` throws or returns empty, which triggers auto-recovery.
 
 **Auto-recovery:** When a stale toggle is detected, the app automatically re-scans the tree in a background thread using the existing tree connection (skips reconnect, ~8s). After re-scanning, the failed toggle is retried. If the tree itself is stale (panel was closed/reopened), falls back to showing a notification for manual Refresh.
 
