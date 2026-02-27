@@ -218,15 +218,17 @@ def scan_levels(tree):
 
 
 def toggle_visibility(level):
-    """Toggle a level's visibility. Returns True on success."""
+    """Toggle a level's visibility. Returns True only if the state actually changed."""
     btn = level.get("vis_btn")
-    if btn:
-        try:
-            btn.iface_invoke.Invoke()
-            return True
-        except Exception:
-            pass
-    return False
+    if not btn:
+        return False
+    try:
+        before = btn.iface_toggle.CurrentToggleState
+        btn.iface_invoke.Invoke()
+        after = btn.iface_toggle.CurrentToggleState
+        return before != after
+    except Exception:
+        return False
 
 
 # ---------- Hotkey helpers ----------
@@ -293,6 +295,7 @@ class LevelManagerApp:
         self.levels = []
         self.panel = None
         self.tree = None
+        self._cached_tree_count = 0
         self.hotkeys = {}  # level_number -> hotkey dict
         self.groups = {}   # group_name -> {"levels": [num, ...], "hotkey": {...} or None}
         self.row_widgets = {}  # level_number -> dict of widgets
@@ -447,6 +450,10 @@ class LevelManagerApp:
         self.tree = tree
         levels = scan_levels(tree)
         self.levels = levels
+        try:
+            self._cached_tree_count = len(tree.children(control_type="TreeItem"))
+        except Exception:
+            self._cached_tree_count = 0
         self._populate_treeview()
         self._set_status(f"Connected — {len(levels)} level(s) found")
 
@@ -846,8 +853,24 @@ class LevelManagerApp:
         elif _is_shift(key):
             self._shift_held = False
 
+    def _tree_changed(self):
+        """Quick check: has the tree structure changed since last scan?"""
+        if not self.tree:
+            return True
+        try:
+            current_count = len(self.tree.children(control_type="TreeItem"))
+            return current_count != self._cached_tree_count
+        except Exception:
+            return True
+
+    def _ensure_fresh(self):
+        """If tree structure changed, reconnect and rescan."""
+        if self._tree_changed():
+            self._connect_and_scan()
+
     def _hotkey_toggle(self, level_number):
         """Toggle a level by its number (called from hotkey)."""
+        self._ensure_fresh()
         for lvl in self.levels:
             if lvl["number"] == level_number:
                 if toggle_visibility(lvl):
@@ -865,6 +888,7 @@ class LevelManagerApp:
 
     def _hotkey_toggle_group(self, level_numbers, group_name):
         """Toggle all levels in a group (called from hotkey)."""
+        self._ensure_fresh()
         toggled = 0
         failed = False
         for num in level_numbers:
