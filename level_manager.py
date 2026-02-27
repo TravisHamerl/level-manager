@@ -176,7 +176,12 @@ def connect_levels_panel():
 
 
 def scan_levels(tree):
-    """Scan the tree and return a list of level dicts."""
+    """Scan the tree and return a list of level dicts.
+
+    Note: The Mastercam Levels tree is virtualized — only items currently
+    visible in the viewport have UIA elements. Scroll the levels you need
+    into view in Mastercam before connecting.
+    """
     levels = []
     items = tree.children(control_type="TreeItem")
 
