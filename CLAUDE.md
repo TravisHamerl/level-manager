@@ -73,7 +73,9 @@ LevelTreeListBox (Tree, auto_id="LevelTreeListBox")
 
 Uses UIA `Invoke` pattern on `IsLevelVisibleButton` — no mouse movement required.
 
-**Stale reference detection:** After `Invoke()`, the app reads the button's `Toggle` state before and after. If unchanged (stale COM reference silently did nothing), it reconnects and retries. A tree child count guard also proactively reconnects when levels are added/deleted.
+**Stale reference detection:** After `Invoke()`, the app reads the button's `Toggle` state before and after. If unchanged (stale COM reference silently did nothing), it uses a tiered retry: targeted re-lookup for just that level number (fast), then full reconnect only as a last resort.
+
+**Nested levels:** Uses `tree.descendants()` (not `children()`) to find levels inside expanded groups.
 
 ### Hotkey System
 
@@ -115,8 +117,9 @@ Stored at `%LOCALAPPDATA%\LevelManager\settings.json` (not in Dropbox):
 |----------|-------------|
 | `toggle_visibility(level)` | Invoke button + read-back verify; returns `True` only if state changed |
 | `_ensure_fresh()` | Check tree child count; reconnect if structure changed |
-| `_hotkey_toggle(number)` | Single level toggle with auto-reconnect on failure |
-| `_hotkey_toggle_group(numbers, name)` | Group toggle with partial failure handling |
+| `_find_level_fresh(number)` | Targeted single-level re-lookup using existing tree ref |
+| `_hotkey_toggle(number)` | Single level toggle with tiered retry (cache → re-lookup → reconnect) |
+| `_hotkey_toggle_group(numbers, name)` | Group toggle with tiered retry and partial failure handling |
 
 ### Hotkey Helpers (`level_manager.py`)
 

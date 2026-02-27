@@ -171,7 +171,7 @@ def find_level_tree(panel):
 def scan_levels(tree):
     """Scan the tree and return a list of level dicts."""
     levels = []
-    items = tree.children(control_type="TreeItem")
+    items = tree.descendants(control_type="TreeItem")
 
     for item in items:
         if "LevelTreeItem" not in item.window_text():
@@ -295,7 +295,6 @@ class LevelManagerApp:
         self.levels = []
         self.panel = None
         self.tree = None
-        self._cached_tree_count = 0
         self.hotkeys = {}  # level_number -> hotkey dict
         self.groups = {}   # group_name -> {"levels": [num, ...], "hotkey": {...} or None}
         self.row_widgets = {}  # level_number -> dict of widgets
@@ -450,10 +449,6 @@ class LevelManagerApp:
         self.tree = tree
         levels = scan_levels(tree)
         self.levels = levels
-        try:
-            self._cached_tree_count = len(tree.children(control_type="TreeItem"))
-        except Exception:
-            self._cached_tree_count = 0
         self._populate_treeview()
         self._set_status(f"Connected — {len(levels)} level(s) found")
 
@@ -853,63 +848,139 @@ class LevelManagerApp:
         elif _is_shift(key):
             self._shift_held = False
 
-    def _tree_changed(self):
-        """Quick check: has the tree structure changed since last scan?"""
-        if not self.tree:
-            return True
-        try:
-            current_count = len(self.tree.children(control_type="TreeItem"))
-            return current_count != self._cached_tree_count
-        except Exception:
-            return True
+    def _find_level_fresh(self, level_number):
+        """Targeted lookup for a single level by number using existing tree ref.
 
-    def _ensure_fresh(self):
-        """If tree structure changed, reconnect and rescan."""
-        if self._tree_changed():
-            self._connect_and_scan()
+        Walks the tree to find the specific level, updates the cached entry
+        in self.levels, and returns the level dict (or None).
+        """
+        if not self.tree:
+            return None
+        try:
+            items = self.tree.descendants(control_type="TreeItem")
+        except Exception:
+            return None
+        level_str = str(level_number)
+        for item in items:
+            if "LevelTreeItem" not in item.window_text():
+                continue
+            try:
+                edits = item.children(control_type="Edit")
+                number = None
+                name = None
+                for edit in edits:
+                    try:
+                        val = edit.iface_value
+                        if val:
+                            v = val.CurrentValue
+                            if v and v == level_str and number is None:
+                                number = v
+                            elif v and v != level_str:
+                                name = v
+                    except Exception:
+                        pass
+                if number != level_str:
+                    continue
+                # Found the level — get its visibility button
+                vis_btn = None
+                for child in item.children():
+                    try:
+                        if child.automation_id() == "IsLevelVisibleButton":
+                            vis_btn = child
+                            break
+                    except Exception:
+                        pass
+                lvl = {
+                    "number": number,
+                    "name": name or f"Level {number}",
+                    "item": item,
+                    "vis_btn": vis_btn,
+                }
+                # Update cache
+                for i, cached in enumerate(self.levels):
+                    if cached["number"] == level_str:
+                        self.levels[i] = lvl
+                        break
+                else:
+                    self.levels.append(lvl)
+                return lvl
+            except Exception:
+                pass
+        return None
 
     def _hotkey_toggle(self, level_number):
-        """Toggle a level by its number (called from hotkey)."""
-        self._ensure_fresh()
+        """Toggle a level by its number (called from hotkey).
+
+        Tiered retry: cached wrapper → targeted re-lookup → full reconnect.
+        """
+        # Tier 1: try cached wrapper (fast, ~5ms with read-back verify)
         for lvl in self.levels:
             if lvl["number"] == level_number:
                 if toggle_visibility(lvl):
                     self._set_status(f"Toggled level {level_number} ({lvl['name']})")
-                else:
-                    self._set_status("Toggle failed, reconnecting...")
-                    self._connect_and_scan()
-                    for lvl2 in self.levels:
-                        if lvl2["number"] == level_number:
-                            if toggle_visibility(lvl2):
-                                self._set_status(f"Toggled level {level_number} ({lvl2['name']})")
-                            break
+                    return
+                # Tier 2: targeted re-lookup for just this level
+                lvl2 = self._find_level_fresh(level_number)
+                if lvl2 and toggle_visibility(lvl2):
+                    self._set_status(f"Toggled level {level_number} ({lvl2['name']})")
+                    return
+                # Tier 3: full reconnect as last resort
+                self._set_status("Toggle failed, reconnecting...")
+                self._connect_and_scan()
+                for lvl3 in self.levels:
+                    if lvl3["number"] == level_number:
+                        if toggle_visibility(lvl3):
+                            self._set_status(f"Toggled level {level_number} ({lvl3['name']})")
+                        else:
+                            self._set_status(f"Toggle failed for level {level_number}")
+                        break
                 return
         self._set_status(f"Level {level_number} not found — try Refresh")
 
     def _hotkey_toggle_group(self, level_numbers, group_name):
-        """Toggle all levels in a group (called from hotkey)."""
-        self._ensure_fresh()
+        """Toggle all levels in a group (called from hotkey).
+
+        Tiered retry: cached wrappers → targeted re-lookup for failures → full reconnect.
+        """
+        # Tier 1: try cached wrappers
         toggled = 0
-        failed = False
+        failed_nums = []
         for num in level_numbers:
             for lvl in self.levels:
                 if lvl["number"] == num:
                     if toggle_visibility(lvl):
                         toggled += 1
                     else:
-                        failed = True
+                        failed_nums.append(num)
                     break
-        if failed and toggled == 0:
-            self._set_status(f"Group toggle failed, reconnecting...")
-            self._connect_and_scan()
-            for num in level_numbers:
-                for lvl in self.levels:
-                    if lvl["number"] == num:
-                        toggle_visibility(lvl)
-                        break
-            self._set_status(f"Toggled group \"{group_name}\" ({len(level_numbers)} levels)")
-        else:
+            else:
+                failed_nums.append(num)
+
+        if not failed_nums:
             self._set_status(f"Toggled group \"{group_name}\" ({toggled}/{len(level_numbers)} levels)")
+            return
+
+        # Tier 2: targeted re-lookup for failed levels only
+        for num in list(failed_nums):
+            lvl2 = self._find_level_fresh(num)
+            if lvl2 and toggle_visibility(lvl2):
+                toggled += 1
+                failed_nums.remove(num)
+
+        if not failed_nums:
+            self._set_status(f"Toggled group \"{group_name}\" ({toggled}/{len(level_numbers)} levels)")
+            return
+
+        # Tier 3: full reconnect as last resort
+        self._set_status(f"Group toggle failed ({len(failed_nums)} stale), reconnecting...")
+        self._connect_and_scan()
+        for num in failed_nums:
+            for lvl in self.levels:
+                if lvl["number"] == num:
+                    if toggle_visibility(lvl):
+                        toggled += 1
+                    break
+        self._set_status(f"Toggled group \"{group_name}\" ({toggled}/{len(level_numbers)} levels)")
 
     # ---------- Lifecycle ----------
 
