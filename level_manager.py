@@ -71,11 +71,9 @@ def _get_title(hwnd):
     return buf.value
 
 
-def find_levels_hwnd():
-    """Find the Levels panel HwndWrapper handle via Win32 (fast)."""
-    print("[LevelManager] Finding Mastercam...", flush=True)
+def _find_mastercam_hwnd():
+    """Find the main Mastercam window handle via Win32 (fast)."""
     mc_hwnd = None
-
     def find_mc(hwnd, _):
         nonlocal mc_hwnd
         title = _get_title(hwnd)
@@ -83,7 +81,6 @@ def find_levels_hwnd():
             mc_hwnd = hwnd
         return True
     EnumWindows(WNDENUMPROC(find_mc), 0)
-
     if not mc_hwnd:
         def find_mc2(hwnd, _):
             nonlocal mc_hwnd
@@ -92,80 +89,90 @@ def find_levels_hwnd():
                 mc_hwnd = hwnd
             return True
         EnumWindows(WNDENUMPROC(find_mc2), 0)
+    return mc_hwnd
 
-    if not mc_hwnd:
-        print("[LevelManager] Mastercam not found!", flush=True)
-        return None
 
-    print(f"[LevelManager] Found: {_get_title(mc_hwnd)} (hwnd={mc_hwnd})", flush=True)
-
-    # Fast path: search for known GUID
-    print("[LevelManager] Searching for Levels panel (GUID 732c3493)...", flush=True)
+def _find_levels_by_guid(mc_hwnd, guid_substr):
+    """Search child windows for a HwndWrapper with the given GUID substring."""
     levels_hwnd = None
-
     def find_levels(hwnd, _):
         nonlocal levels_hwnd
         cls = _get_class(hwnd)
-        if '732c3493' in cls:
+        if guid_substr in cls:
             levels_hwnd = hwnd
         return True
     EnumChildWindows(mc_hwnd, WNDENUMPROC(find_levels), 0)
+    return levels_hwnd
 
-    if levels_hwnd:
-        print(f"[LevelManager] Found Levels panel via GUID (hwnd={levels_hwnd})", flush=True)
-        return levels_hwnd
 
-    # Fallback: search all HwndWrapper children for one containing LevelTreeListBox
-    print("[LevelManager] GUID not found, trying fallback (HwndWrapper scan)...", flush=True)
-    hwnd_wrappers = []
-
-    def find_wrappers(hwnd, _):
-        cls = _get_class(hwnd)
-        if 'HwndWrapper' in cls and IsWindowVisible(hwnd):
-            hwnd_wrappers.append(hwnd)
-        return True
-    EnumChildWindows(mc_hwnd, WNDENUMPROC(find_wrappers), 0)
-
-    print(f"[LevelManager] Found {len(hwnd_wrappers)} HwndWrapper window(s)", flush=True)
-    for hw in hwnd_wrappers:
-        try:
-            app = Application(backend='uia').connect(handle=hw)
-            win = app.window(handle=hw)
-            tree = win.child_window(auto_id="LevelTreeListBox", control_type="Tree")
-            if tree.exists(timeout=1):
-                print(f"[LevelManager] Found Levels panel via fallback (hwnd={hw}, class={_get_class(hw)})", flush=True)
-                return hw
-        except Exception:
-            pass
-
-    print("[LevelManager] Levels panel not found by any method!", flush=True)
-    return None
+# GUID cache — persisted to settings so only the first-ever connect is slow
+_cached_guid = None
 
 
 def connect_levels_panel():
-    """Connect to the Levels panel. Returns (panel_wrapper, error_msg)."""
-    hwnd = find_levels_hwnd()
-    if not hwnd:
-        return None, "Levels panel not found. Is it open in Mastercam?"
-    try:
-        print(f"[LevelManager] Connecting UIA to hwnd={hwnd}...", flush=True)
-        app = Application(backend='uia').connect(handle=hwnd)
-        print("[LevelManager] Connected!", flush=True)
-        return app.window(handle=hwnd), None
-    except Exception as e:
-        print(f"[LevelManager] UIA connect failed: {e}", flush=True)
-        return None, f"UIA connect failed: {e}"
+    """Connect to Levels panel. Returns (panel_wrapper, tree, error_msg).
 
+    Uses cached GUID for fast Win32 lookup. On first run (no cache),
+    falls back to probing HwndWrapper windows via UIA and caches the
+    discovered GUID for future connects.
+    """
+    global _cached_guid
 
-def find_level_tree(panel):
-    """Find the LevelTreeListBox in the panel."""
-    try:
-        tree = panel.child_window(auto_id="LevelTreeListBox", control_type="Tree")
-        if not tree.exists(timeout=2):
-            return None
-        return tree
-    except Exception:
-        return None
+    mc_hwnd = _find_mastercam_hwnd()
+    if not mc_hwnd:
+        return None, None, "Mastercam not found."
+
+    # Load cached GUID from settings if we don't have it in memory
+    if not _cached_guid:
+        settings = load_settings()
+        _cached_guid = settings.get("levels_guid")
+
+    # Fast path: try cached GUID first
+    if _cached_guid:
+        levels_hwnd = _find_levels_by_guid(mc_hwnd, _cached_guid)
+        if levels_hwnd:
+            try:
+                app = Application(backend='uia').connect(handle=levels_hwnd)
+                panel = app.window(handle=levels_hwnd)
+                tree = panel.child_window(auto_id="LevelTreeListBox", control_type="Tree")
+                if tree.exists(timeout=2):
+                    return panel, tree, None
+            except Exception:
+                pass
+        # Cached GUID failed — clear it and fall through to probe
+        _cached_guid = None
+
+    # Slow path: probe all HwndWrapper children for one with LevelTreeListBox
+    hwnd_wrappers = []
+    def find_wrappers(hwnd, _):
+        cls = _get_class(hwnd)
+        if 'HwndWrapper' in cls and IsWindowVisible(hwnd):
+            hwnd_wrappers.append((hwnd, cls))
+        return True
+    EnumChildWindows(mc_hwnd, WNDENUMPROC(find_wrappers), 0)
+
+    for hw, cls in hwnd_wrappers:
+        try:
+            app = Application(backend='uia').connect(handle=hw)
+            panel = app.window(handle=hw)
+            tree = panel.child_window(auto_id="LevelTreeListBox", control_type="Tree")
+            if tree.exists(timeout=1):
+                # Extract GUID from class name and cache it
+                # Class looks like "HwndWrapper[DefaultDomain;;ee99ee78-...]"
+                for part in cls.split(';'):
+                    part = part.strip(']').strip()
+                    if len(part) >= 8 and '-' in part:
+                        _cached_guid = part[:8]
+                        break
+                if _cached_guid:
+                    settings = load_settings()
+                    settings["levels_guid"] = _cached_guid
+                    save_settings(settings)
+                return panel, tree, None
+        except Exception:
+            pass
+
+    return None, None, "Levels panel not found. Is it open in Mastercam?"
 
 
 def scan_levels(tree):
@@ -177,33 +184,29 @@ def scan_levels(tree):
         if "LevelTreeItem" not in item.window_text():
             continue
         try:
-            edits = item.children(control_type="Edit")
+            # Single children() call — extract edits and button from same list
+            all_children = item.children()
             number = None
             name = None
-            for edit in edits:
+            vis_btn = None
+            for child in all_children:
                 try:
-                    val = edit.iface_value
-                    if val:
-                        v = val.CurrentValue
-                        if v and v.isdigit() and number is None:
-                            number = v
-                        elif v and not v.isdigit():
-                            name = v
+                    ct = child.element_info.control_type
+                    if ct == "Edit":
+                        val = child.iface_value
+                        if val:
+                            v = val.CurrentValue
+                            if v and v.isdigit() and number is None:
+                                number = v
+                            elif v and not v.isdigit():
+                                name = v
+                    elif ct == "Button" and child.automation_id() == "IsLevelVisibleButton":
+                        vis_btn = child
                 except Exception:
                     pass
 
             if number is None:
                 continue
-
-            # Find visibility button
-            vis_btn = None
-            for child in item.children():
-                try:
-                    if child.automation_id() == "IsLevelVisibleButton":
-                        vis_btn = child
-                        break
-                except Exception:
-                    pass
 
             levels.append({
                 "number": number,
@@ -433,17 +436,12 @@ class LevelManagerApp:
         self._set_status("Connecting to Mastercam Levels panel...")
         self.root.update_idletasks()
 
-        panel, err = connect_levels_panel()
+        panel, tree, err = connect_levels_panel()
         if err:
             self._set_status(f"Error: {err}")
             return
 
         self.panel = panel
-        tree = find_level_tree(panel)
-        if not tree:
-            self._set_status("Error: LevelTreeListBox not found")
-            return
-
         self.tree = tree
         levels = scan_levels(tree)
         self.levels = levels
