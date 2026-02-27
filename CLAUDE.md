@@ -81,9 +81,13 @@ LevelTreeListBox (Tree, auto_id="LevelTreeListBox")
 
 Uses UIA `Invoke` pattern on `IsLevelVisibleButton` — no mouse movement required. The Toggle pattern is **not available** on these buttons; only Invoke is supported.
 
-**Stale reference detection:** Before each `Invoke()`, the app checks `btn.exists()` to detect stale COM wrappers (which silently do nothing instead of throwing). If stale, shows a notification with bell/flash prompting the user to click Refresh.
+**Stale reference detection:** Before each `Invoke()`, the app reads `btn.element_info.runtime_id` to verify the COM wrapper is still valid (stale wrappers throw here, while `Invoke()` silently does nothing).
 
-**Level renumbering support:** When levels are renumbered in Mastercam, clicking Refresh reconciles hotkey and group assignments by matching levels by **name** (which stays stable across renumbering). Remapped entries are saved to settings automatically.
+**Auto-recovery:** When a stale toggle is detected, the app automatically re-scans the tree in a background thread using the existing tree connection (skips reconnect, ~8s). After re-scanning, the failed toggle is retried. If the tree itself is stale (panel was closed/reopened), falls back to showing a notification for manual Refresh.
+
+**Level renumbering support:** When levels are renumbered in Mastercam, re-scanning reconciles hotkey and group assignments by matching levels by **name** (which stays stable across renumbering). Remapped entries are saved to settings automatically.
+
+**Manual Refresh:** Clicking Refresh tries the fast re-scan path first (reuse existing tree). Only does a full reconnect if re-scan fails.
 
 ### Hotkey System
 

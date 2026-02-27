@@ -11,6 +11,7 @@ import os
 import sys
 import ctypes
 import ctypes.wintypes
+import threading
 import tkinter as tk
 from tkinter import ttk
 from pathlib import Path
@@ -231,8 +232,10 @@ def toggle_visibility(level):
     if not btn:
         return False
     try:
-        if not btn.exists():
-            return False
+        # Access a property to verify the wrapper is still valid.
+        # Stale COM wrappers throw on property access, while Invoke()
+        # silently does nothing.
+        btn.element_info.runtime_id
         btn.iface_invoke.Invoke()
         return True
     except Exception:
@@ -316,6 +319,9 @@ class LevelManagerApp:
         # Recording state
         self._recording_target = None  # level_number or "grp:name"
         self._recording_mods = set()
+
+        # Auto-rescan guard
+        self._rescanning = False
 
         self._load_settings()
         self._build_ui()
@@ -453,6 +459,16 @@ class LevelManagerApp:
         self._connect_and_scan()
 
     def _connect_and_scan(self):
+        # Fast path: try re-scanning existing tree connection first
+        if self.tree:
+            self._set_status("Refreshing levels...")
+            self.root.update_idletasks()
+            if self._rescan_levels():
+                self._populate_treeview()
+                self._set_status(f"Refreshed — {len(self.levels)} level(s) found")
+                return
+
+        # Slow path: full reconnect
         self._set_status("Connecting to Mastercam Levels panel...")
         self.root.update_idletasks()
 
@@ -515,6 +531,55 @@ class LevelManagerApp:
 
         self._save_settings()
         return len(remap)
+
+    def _rescan_levels(self):
+        """Re-scan levels using existing tree connection (skips reconnect).
+
+        Returns True if successful, False if the tree itself is stale.
+        """
+        if not self.tree:
+            return False
+        try:
+            old_levels = self.levels
+            new_levels = scan_levels(self.tree)
+            if not new_levels:
+                return False  # tree probably stale too
+            self.levels = new_levels
+            self._reconcile_numbers(old_levels)
+            return True
+        except Exception:
+            return False
+
+    def _auto_rescan_and_retry(self, level_number=None, group_numbers=None, group_name=None):
+        """Auto-rescan in background thread, then retry the failed toggle."""
+        if self._rescanning:
+            return
+        self._rescanning = True
+        self._set_status("Auto-refreshing...")
+
+        def _worker():
+            try:
+                success = self._rescan_levels()
+            except Exception:
+                success = False
+            finally:
+                self._rescanning = False
+
+            if not success:
+                self.root.after(0, self._notify_stale)
+                return
+
+            # Update UI and retry toggle on the tkinter thread
+            def _finish():
+                self._populate_treeview()
+                if level_number:
+                    self._hotkey_toggle(level_number, retry=False)
+                elif group_numbers:
+                    self._hotkey_toggle_group(group_numbers, group_name, retry=False)
+
+            self.root.after(0, _finish)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _populate_treeview(self):
         """Rebuild the treeview with groups and ungrouped levels."""
@@ -912,18 +977,20 @@ class LevelManagerApp:
         elif _is_shift(key):
             self._shift_held = False
 
-    def _hotkey_toggle(self, level_number):
+    def _hotkey_toggle(self, level_number, retry=True):
         """Toggle a level by its number (called from hotkey)."""
         for lvl in self.levels:
             if lvl["number"] == level_number:
                 if toggle_visibility(lvl):
                     self._set_status(f"Toggled level {level_number} ({lvl['name']})")
+                elif retry:
+                    self._auto_rescan_and_retry(level_number=level_number)
                 else:
                     self._notify_stale()
                 return
         self._set_status(f"Level {level_number} not found — try Refresh")
 
-    def _hotkey_toggle_group(self, level_numbers, group_name):
+    def _hotkey_toggle_group(self, level_numbers, group_name, retry=True):
         """Toggle all levels in a group (called from hotkey)."""
         toggled = 0
         failed = False
@@ -936,7 +1003,10 @@ class LevelManagerApp:
                         failed = True
                     break
         if failed and toggled == 0:
-            self._notify_stale()
+            if retry:
+                self._auto_rescan_and_retry(group_numbers=level_numbers, group_name=group_name)
+            else:
+                self._notify_stale()
         elif failed:
             self._set_status(f"Toggled group \"{group_name}\" ({toggled}/{len(level_numbers)} levels) — some stale, click Refresh")
         else:
