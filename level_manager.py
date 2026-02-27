@@ -1064,7 +1064,10 @@ class LevelManagerApp:
                 else:
                     self._notify_stale()
                 return
-        self._set_status(f"Level {level_number} not found — try Refresh")
+        if retry:
+            self._auto_rescan_and_retry(level_number=level_number)
+        else:
+            self._set_status(f"Level {level_number} not found — try Refresh")
 
     def _hotkey_toggle_group(self, level_numbers, group_name, retry=True):
         """Toggle all levels in a group (called from hotkey)."""
