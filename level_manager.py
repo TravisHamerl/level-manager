@@ -135,7 +135,7 @@ def connect_levels_panel():
                 app = Application(backend='uia').connect(handle=levels_hwnd)
                 panel = app.window(handle=levels_hwnd)
                 tree = panel.child_window(auto_id="LevelTreeListBox", control_type="Tree")
-                if tree.exists(timeout=2):
+                if tree.exists(timeout=0.5):
                     return panel, tree, None
             except Exception:
                 pass
@@ -430,6 +430,19 @@ class LevelManagerApp:
 
     def _set_status(self, msg):
         self._status_var.set(msg)
+
+    def _notify_stale(self):
+        """Show a prominent notification that levels need refreshing."""
+        self._set_status("⚠ Connection stale — click Refresh to reconnect")
+        self._connect_btn.configure(text="⟳ Refresh")
+        # Flash the window to get attention
+        try:
+            self.root.attributes('-topmost', True)
+            self.root.bell()
+            if not self._always_on_top:
+                self.root.after(500, lambda: self.root.attributes('-topmost', False))
+        except Exception:
+            pass
 
     # ---------- Connection ----------
 
@@ -856,13 +869,7 @@ class LevelManagerApp:
                 if toggle_visibility(lvl):
                     self._set_status(f"Toggled level {level_number} ({lvl['name']})")
                 else:
-                    self._set_status("Toggle failed, reconnecting...")
-                    self._connect_and_scan()
-                    for lvl2 in self.levels:
-                        if lvl2["number"] == level_number:
-                            if toggle_visibility(lvl2):
-                                self._set_status(f"Toggled level {level_number} ({lvl2['name']})")
-                            break
+                    self._notify_stale()
                 return
         self._set_status(f"Level {level_number} not found — try Refresh")
 
@@ -879,14 +886,9 @@ class LevelManagerApp:
                         failed = True
                     break
         if failed and toggled == 0:
-            self._set_status(f"Group toggle failed, reconnecting...")
-            self._connect_and_scan()
-            for num in level_numbers:
-                for lvl in self.levels:
-                    if lvl["number"] == num:
-                        toggle_visibility(lvl)
-                        break
-            self._set_status(f"Toggled group \"{group_name}\" ({len(level_numbers)} levels)")
+            self._notify_stale()
+        elif failed:
+            self._set_status(f"Toggled group \"{group_name}\" ({toggled}/{len(level_numbers)} levels) — some stale, click Refresh")
         else:
             self._set_status(f"Toggled group \"{group_name}\" ({toggled}/{len(level_numbers)} levels)")
 
