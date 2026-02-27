@@ -333,6 +333,7 @@ class LevelManagerApp:
 
         # Auto-rescan guard
         self._rescanning = False
+        self._health_poll_id = None
 
         self._load_settings()
         self._build_ui()
@@ -477,6 +478,7 @@ class LevelManagerApp:
             if self._rescan_levels():
                 self._populate_treeview()
                 self._set_status(f"Refreshed — {len(self.levels)} level(s) found")
+                self._start_health_poll()
                 return
 
         # Slow path: full reconnect
@@ -498,6 +500,7 @@ class LevelManagerApp:
             self._set_status(f"Connected — {len(self.levels)} level(s), remapped {remapped} hotkey(s)")
         else:
             self._set_status(f"Connected — {len(self.levels)} level(s) found")
+        self._start_health_poll()
 
     def _reconcile_numbers(self, old_levels):
         """Remap hotkeys and groups when level numbers change.
@@ -591,6 +594,68 @@ class LevelManagerApp:
             self.root.after(0, _finish)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _start_health_poll(self):
+        """Start periodic health check that detects stale wrappers proactively."""
+        self._stop_health_poll()
+        self._health_poll_id = self.root.after(15000, self._health_check)
+
+    def _stop_health_poll(self):
+        if self._health_poll_id:
+            self.root.after_cancel(self._health_poll_id)
+            self._health_poll_id = None
+
+    def _health_check(self):
+        """Probe one cached TreeItem to detect stale wrappers. ~150ms."""
+        self._health_poll_id = None
+        if not self.levels or self._rescanning:
+            self._start_health_poll()
+            return
+
+        # Pick first level's TreeItem and try to find its button
+        item = self.levels[0].get("item")
+        if not item:
+            self._start_health_poll()
+            return
+
+        def _probe():
+            try:
+                children = item.children()
+                for ch in children:
+                    try:
+                        if (ch.element_info.control_type == "Button"
+                                and ch.automation_id() == "IsLevelVisibleButton"):
+                            return True  # still fresh
+                    except Exception:
+                        pass
+                return False  # button not found → stale
+            except Exception:
+                return False  # item stale
+
+        def _on_result(fresh):
+            if not fresh and not self._rescanning:
+                self._set_status("Detected change — refreshing...")
+                self._rescanning = True
+                def _rescan_worker():
+                    try:
+                        success = self._rescan_levels()
+                    except Exception:
+                        success = False
+                    finally:
+                        self._rescanning = False
+                    def _update_ui():
+                        if success:
+                            self._populate_treeview()
+                            self._set_status(f"Refreshed — {len(self.levels)} level(s)")
+                    self.root.after(0, _update_ui)
+                threading.Thread(target=_rescan_worker, daemon=True).start()
+            self._start_health_poll()
+
+        # Run probe in background to avoid blocking UI
+        def _bg():
+            fresh = _probe()
+            self.root.after(0, lambda: _on_result(fresh))
+        threading.Thread(target=_bg, daemon=True).start()
 
     def _populate_treeview(self):
         """Rebuild the treeview with groups and ungrouped levels."""
@@ -1027,6 +1092,7 @@ class LevelManagerApp:
 
     def _on_close(self):
         self._save_settings()
+        self._stop_health_poll()
         self._stop_hotkey_listener()
         self.root.destroy()
 
